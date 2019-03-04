@@ -50,6 +50,7 @@ static long spp_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	long n;
 	char buf[128];
 	const void __user *from;
+	struct spp_params spp;
 
 	from = (const void __user *)arg;
 	if (!access_ok(VERIFY_READ, from, 8))
@@ -58,14 +59,17 @@ static long spp_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	n = __copy_from_user(buf, from, 8);
 	buf[8] = '\0';
 
-	printk(KERN_INFO "ioctl invoked with cmd: %u, arg: %s, n: %ld\n",
-	       cmd, buf, n);
+	printk(KERN_INFO "ioctl invoked with cmd: %u, arg: %s, n: %ld, %#x\n",
+	       cmd, buf, n, SPPIOC_SPARAMS);
 	switch (cmd) {
 	case SPPIOC_START:
 		break;
 	case SPPIOC_STOP:
 		break;
 	case SPPIOC_SPARAMS:
+		if (copy_from_user(&spp, from, sizeof(spp)))
+			return -EFAULT;
+		printk(KERN_INFO "spp params: %lld secs, %llu nsecs\n", spp.secs, spp.nsecs);
 		break;
 	default:
 		return -EINVAL;
