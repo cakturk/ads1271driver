@@ -1,5 +1,6 @@
 #include <linux/version.h>
 #include <linux/module.h>
+#include <linux/miscdevice.h>
 #include <linux/hrtimer.h>
 #include <linux/time.h>
 
@@ -13,9 +14,6 @@ static struct hrtimer htimer;
 static ktime_t kt_periode;
 
 static enum hrtimer_restart timer_function(struct hrtimer * timer);
-static enum hrtimer_restart timer2_function(struct hrtimer * timer);
-
-static struct hrtimer htimer2;
 
 static void timer_init(void)
 {
@@ -23,19 +21,6 @@ static void timer_init(void)
 	hrtimer_init (&htimer, CLOCK_REALTIME, HRTIMER_MODE_REL);
 	htimer.function = timer_function;
 	hrtimer_start(&htimer, kt_periode, HRTIMER_MODE_REL);
-}
-
-static void timer2_init(void)
-{
-	ktime_t t = ktime_set(1, 0);
-	hrtimer_init(&htimer2, CLOCK_REALTIME, HRTIMER_MODE_REL);
-	htimer.function = timer2_function;
-	hrtimer_start(&htimer2, t, HRTIMER_MODE_REL);
-}
-
-static void timer_cleanup(void)
-{
-	hrtimer_cancel(& htimer);
 }
 
 static enum hrtimer_restart timer_function(struct hrtimer * timer)
@@ -48,29 +33,59 @@ static enum hrtimer_restart timer_function(struct hrtimer * timer)
 	return HRTIMER_RESTART;
 }
 
-static enum hrtimer_restart timer2_function(struct hrtimer * timer)
-{
-	/* @Do your work here. */
-	printk(KERN_INFO"1 second elapsed!\n");
-	timer_cleanup();
-	printk(KERN_INFO"1 second elapsed stopped sampler!\n");
-
-	return HRTIMER_NORESTART;
-}
-
 enum hrtimer_restart do_timer(struct hrtimer *handle)
 {
 	count++;
 	return HRTIMER_RESTART;
 }
 
+ssize_t sp_read(struct file *filp, char __user *buf, size_t c, loff_t *ppos)
+{
+	return 0;
+}
+
+ssize_t sp_write(struct file *filp, const char __user *buf, size_t c, loff_t *ppos)
+{
+	return 0;
+}
+
+int sp_open(struct inode *ino, struct file *filp)
+{
+	return 0;
+}
+
+int sp_release(struct inode *ino, struct file *filp)
+{
+	return 0;
+}
+
+static const struct file_operations sp_fops = {
+	.owner = THIS_MODULE,
+	/* .read  = sp_read, */
+	.write = sp_write,
+	/* .open  = sp_open, */
+};
+
+static struct miscdevice perdev = {
+	.minor = MISC_DYNAMIC_MINOR,
+	.name = "spiperiodic",
+	.fops = &sp_fops,
+};
+
 static int __init hrtimer_test_init(void)
 {
+	int err;
 	unsigned int resolution = hrtimer_resolution;
 
 	timer_init();
-	/* timer2_init(); */
 	printk(KERN_INFO "resolution : %u secs\n", resolution);
+
+	err = misc_register(&perdev);
+	if (err) {
+		printk(KERN_ERR "error registering misc device\n");
+		return -EINVAL;
+	}
+
 	return 0;
 }
 
@@ -78,11 +93,10 @@ static void __exit hrtimer_test_exit(void)
 {
 	int ret;
 
-	/* ret = hrtimer_cancel(&htimer2); */
-	/* printk(KERN_INFO "Cancelling main timer: %d\n", ret); */
-
 	ret = hrtimer_cancel(&htimer);
 	printk(KERN_INFO "Cancelling hrtimer: %d, count: %u\n", ret, count);
+
+	misc_deregister(&perdev);
 
 	return ;
 }
