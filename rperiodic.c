@@ -8,6 +8,7 @@
 #include <linux/hrtimer.h>
 #include <linux/sched.h>
 #include <linux/uaccess.h>
+#include "spp.h"
 
 static unsigned int count;
 
@@ -59,6 +60,16 @@ static long spp_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
 	printk(KERN_INFO "ioctl invoked with cmd: %u, arg: %s, n: %ld\n",
 	       cmd, buf, n);
+	switch (cmd) {
+	case SPPIOC_START:
+		break;
+	case SPPIOC_STOP:
+		break;
+	case SPPIOC_SPARAMS:
+		break;
+	default:
+		return -EINVAL;
+	}
 	return 0;
 }
 
@@ -72,7 +83,7 @@ static int spp_close(struct inode *inode, struct file *filp)
 	return 0;
 }
 
-static const struct file_operations sp_fops = {
+static const struct file_operations spp_fops = {
 	.owner		= THIS_MODULE,
 	.llseek		= no_llseek,
 	.read		= spp_read,
@@ -85,10 +96,10 @@ static const struct file_operations sp_fops = {
 static struct miscdevice perdev = {
 	.minor = MISC_DYNAMIC_MINOR,
 	.name = "spiperiodic",
-	.fops = &sp_fops,
+	.fops = &spp_fops,
 };
 
-static int __init hrtimer_test_init(void)
+static int __init spp_init(void)
 {
 	int err;
 	unsigned int resolution = hrtimer_resolution;
@@ -105,7 +116,7 @@ static int __init hrtimer_test_init(void)
 	return 0;
 }
 
-static void __exit hrtimer_test_exit(void)
+static void __exit spp_exit(void)
 {
 	int ret;
 
@@ -117,8 +128,8 @@ static void __exit hrtimer_test_exit(void)
 	return ;
 }
 
-module_init(hrtimer_test_init);
-module_exit(hrtimer_test_exit);
+module_init(spp_init);
+module_exit(spp_exit);
 MODULE_AUTHOR("hrtimer test for demo only");
 MODULE_DESCRIPTION("hrtimer resolution");
 MODULE_LICENSE("GPL");
