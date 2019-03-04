@@ -7,6 +7,7 @@
 #include <linux/interrupt.h>
 #include <linux/hrtimer.h>
 #include <linux/sched.h>
+#include <linux/uaccess.h>
 
 static unsigned int count;
 
@@ -45,6 +46,19 @@ static ssize_t spp_write(struct file *filp, const char __user *buf,
 
 static long spp_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
+	long n;
+	char buf[128];
+	const void __user *from;
+
+	from = (const void __user *)arg;
+	if (!access_ok(VERIFY_READ, from, 8))
+		return -EFAULT;
+
+	n = __copy_from_user(buf, from, 8);
+	buf[8] = '\0';
+
+	printk(KERN_INFO "ioctl invoked with cmd: %u, arg: %s, n: %ld\n",
+	       cmd, buf, n);
 	return 0;
 }
 
