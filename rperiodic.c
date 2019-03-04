@@ -11,59 +11,61 @@
 static unsigned int count;
 
 static struct hrtimer htimer;
-static ktime_t kt_periode;
+static ktime_t kt_period;
 
 static enum hrtimer_restart timer_function(struct hrtimer * timer);
 
 static void timer_init(void)
 {
-	kt_periode = ktime_set(0, 104167); //seconds,nanoseconds
-	hrtimer_init (&htimer, CLOCK_REALTIME, HRTIMER_MODE_REL);
+	kt_period = ktime_set(0, 22675); //seconds,nanoseconds
+	hrtimer_init (&htimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	htimer.function = timer_function;
-	hrtimer_start(&htimer, kt_periode, HRTIMER_MODE_REL);
+	hrtimer_start(&htimer, kt_period, HRTIMER_MODE_REL);
 }
 
 static enum hrtimer_restart timer_function(struct hrtimer * timer)
 {
-	/* @Do your work here. */
-
 	count++;
-	hrtimer_forward_now(timer, kt_periode);
+	hrtimer_forward_now(timer, kt_period);
 
 	return HRTIMER_RESTART;
 }
 
-enum hrtimer_restart do_timer(struct hrtimer *handle)
-{
-	count++;
-	return HRTIMER_RESTART;
-}
-
-ssize_t sp_read(struct file *filp, char __user *buf, size_t c, loff_t *ppos)
+static ssize_t spp_read(struct file *filp, char __user *buf,
+			size_t count, loff_t *ppos)
 {
 	return 0;
 }
 
-ssize_t sp_write(struct file *filp, const char __user *buf, size_t c, loff_t *ppos)
+static ssize_t spp_write(struct file *filp, const char __user *buf,
+			 size_t count, loff_t *ppos)
+{
+	return -EBADF;
+}
+
+static long spp_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	return 0;
 }
 
-int sp_open(struct inode *ino, struct file *filp)
+static int spp_open(struct inode *ino, struct file *filp)
 {
 	return 0;
 }
 
-int sp_release(struct inode *ino, struct file *filp)
+static int spp_close(struct inode *inode, struct file *filp)
 {
 	return 0;
 }
 
 static const struct file_operations sp_fops = {
-	.owner = THIS_MODULE,
-	/* .read  = sp_read, */
-	.write = sp_write,
-	/* .open  = sp_open, */
+	.owner		= THIS_MODULE,
+	.llseek		= no_llseek,
+	.read		= spp_read,
+	.write		= spp_write,
+	.unlocked_ioctl	= spp_ioctl,
+	.open		= spp_open,
+	.release	= spp_close,
 };
 
 static struct miscdevice perdev = {
