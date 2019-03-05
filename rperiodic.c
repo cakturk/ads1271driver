@@ -17,6 +17,11 @@ static ktime_t kt_period;
 
 static enum hrtimer_restart timer_function(struct hrtimer * timer);
 
+struct spp_periodic {
+	struct hrtimer timer;
+	ktime_t period;
+};
+
 static void timer_init(void)
 {
 	kt_period = ktime_set(0, 22675); //seconds,nanoseconds
@@ -50,8 +55,10 @@ static long spp_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	long n;
 	char buf[128];
 	const void __user *from;
-	struct spp_params spp;
+	struct spp_conf cnf;
+	struct spp_periodic *sp;
 
+	sp = filp->private_data;
 	from = (const void __user *)arg;
 	if (!access_ok(VERIFY_READ, from, 8))
 		return -EFAULT;
@@ -59,17 +66,18 @@ static long spp_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	n = __copy_from_user(buf, from, 8);
 	buf[8] = '\0';
 
-	printk(KERN_INFO "ioctl invoked with cmd: %u, arg: %s, n: %ld, %#x\n",
-	       cmd, buf, n, SPPIOC_SPARAMS);
+	printk(KERN_INFO "ioctl invoked with cmd: %x, arg: %s, n: %ld, %#lx, %#x, %#x\n",
+	       cmd, buf, n, SPPIOC_SPARAMS, SPPIOC_START, SPPIOC_STOP);
 	switch (cmd) {
 	case SPPIOC_START:
 		break;
 	case SPPIOC_STOP:
 		break;
 	case SPPIOC_SPARAMS:
-		if (copy_from_user(&spp, from, sizeof(spp)))
+		if (copy_from_user(&cnf, from, sizeof(cnf)))
 			return -EFAULT;
-		printk(KERN_INFO "spp params: %lld secs, %llu nsecs\n", spp.secs, spp.nsecs);
+		printk(KERN_INFO "cnf params: %lld secs, %llu nsecs\n", cnf.secs, cnf.nsecs);
+		sp->period = ktime_set(cnf.secs, cnf.nsecs);
 		break;
 	default:
 		return -EINVAL;
@@ -77,8 +85,12 @@ static long spp_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	return 0;
 }
 
+
+static struct spp_periodic spp;
+
 static int spp_open(struct inode *ino, struct file *filp)
 {
+	filp->private_data = &spp;
 	return 0;
 }
 
