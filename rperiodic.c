@@ -8,36 +8,73 @@
 #include <linux/sched.h>
 #include <linux/uaccess.h>
 #include <linux/fs.h>
+#include <linux/kfifo.h>
 
 #include "spp.h"
 
 static enum hrtimer_restart timer_handler(struct hrtimer * timer);
 
+struct adc_sample {
+	u8 buf[24];
+};
+
+#define ADC_MAX_SAMPLES 64
+static struct adc_sample samples[ADC_MAX_SAMPLES];
+
 struct spp_periodic {
 	struct hrtimer timer;
 	ktime_t period;
 	unsigned int nr_ticks;
+
+	DECLARE_KFIFO_PTR(rx_fifo, struct adc_sample *);
+	DECLARE_KFIFO_PTR(free_fifo, struct adc_sample *);
 };
 
 #define to_spp_periodic(ptr) container_of(ptr, struct spp_periodic, timer)
 
-/* static unsigned int count; */
-/* static void timer_init(void) */
-/* { */
-/* 	kt_period = ktime_set(0, 22675); //seconds,nanoseconds */
-/* 	hrtimer_init (&htimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL); */
-/* 	htimer.function = timer_handler; */
-/* 	hrtimer_start(&htimer, kt_period, HRTIMER_MODE_REL); */
-/* } */
+static struct adc_sample *adc_buf_get(struct spp_periodic *sp)
+{
+	struct adc_sample *r;
+	unsigned int n;
 
+	n = kfifo_get(&sp->free_fifo, &r);
+	printk(KERN_INFO "spp: adc_get: %u, %p\n", n, r);
+	return r;
+}
+
+static void spp_free_fifo_init(struct spp_periodic *sp)
+{
+	struct adc_sample *as = NULL;
+	int i, rv;
+
+	for (i = 0; i < ARRAY_SIZE(samples); i++) {
+		rv = kfifo_put(&sp->free_fifo, &samples[i]);
+		printk(KERN_INFO "spp: kfifo_put: %p, %d, %d, len: %d\n",
+		       &samples[i], rv, kfifo_avail(&sp->free_fifo), kfifo_len(&sp->free_fifo));
+	}
+
+	rv = kfifo_peek(&sp->free_fifo, &as);
+	printk(KERN_INFO "spp: peek: %p, rv: %d, size: %zu, len: %zu\n",
+	       as, rv, sizeof(sp->free_fifo), sizeof(samples[1]));
+}
+
+static inline void spp_rx_fifo_init(struct spp_periodic *sp)
+{
+	kfifo_reset(&sp->rx_fifo);
+}
 
 static enum hrtimer_restart timer_handler(struct hrtimer *timer)
 {
 	struct spp_periodic *s;
+	struct adc_sample *r;
 
 	s = to_spp_periodic(timer);
-	hrtimer_forward_now(timer, s->period);
 	s->nr_ticks++;
+
+	r = adc_buf_get(s);
+
+	hrtimer_forward_now(timer, s->period);
+	printk(KERN_INFO "in irq: %lu, %p\n", in_irq(), r);
 
 	return HRTIMER_RESTART;
 }
@@ -91,12 +128,24 @@ static struct spp_periodic spp;
 
 static int spp_open(struct inode *ino, struct file *filp)
 {
+	spp_rx_fifo_init(&spp);
+	spp_free_fifo_init(&spp);
 	filp->private_data = &spp;
 	return 0;
 }
 
 static int spp_close(struct inode *inode, struct file *filp)
 {
+	struct spp_periodic *spp = filp->private_data;
+	struct adc_sample *smpls[120];
+	unsigned int len;
+
+	memset(smpls, 0, sizeof smpls);
+	len = kfifo_out(&spp->free_fifo, smpls, 3);
+	printk(KERN_INFO "spp: close: sz: %zu, len: %u, ptr: %p, ptr: %p\n",
+	       sizeof(smpls), len, smpls[2], smpls[3]);
+	printk(KERN_INFO "spp: rx_len: %u, free_len: %u\n",
+	       kfifo_len(&spp->free_fifo), kfifo_len(&spp->free_fifo));
 	return 0;
 }
 
@@ -120,18 +169,31 @@ static int __init spp_init(void)
 {
 	int err;
 
+	err = kfifo_alloc(&spp.rx_fifo, ADC_MAX_SAMPLES, GFP_KERNEL);
+	if (err)
+		goto err_rx_fifo;
+
+	err = kfifo_alloc(&spp.free_fifo, ADC_MAX_SAMPLES, GFP_KERNEL);
+	if (err)
+		goto err_free_fifo;
+
 	err = misc_register(&perdev);
-	if (err) {
-		printk(KERN_ERR "error registering misc device\n");
-		return -EINVAL;
-	}
+	if (err)
+		goto err_register;
 
 	hrtimer_init(&spp.timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	spp.timer.function = timer_handler;
-
 	printk(KERN_INFO "resolution : %u secs\n", hrtimer_resolution);
 
 	return 0;
+
+err_register:
+	printk(KERN_ERR "error registering misc device\n");
+	kfifo_free(&spp.free_fifo);
+err_free_fifo:
+	kfifo_free(&spp.rx_fifo);
+err_rx_fifo:
+	return err;
 }
 
 static void __exit spp_exit(void)
@@ -143,6 +205,7 @@ static void __exit spp_exit(void)
 	       ret, spp.nr_ticks);
 
 	misc_deregister(&perdev);
+	kfifo_free(&spp.rx_fifo);
 
 	return;
 }
