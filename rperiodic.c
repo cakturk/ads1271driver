@@ -3,11 +3,12 @@
 #include <linux/miscdevice.h>
 #include <linux/hrtimer.h>
 #include <linux/time.h>
-
 #include <linux/interrupt.h>
 #include <linux/hrtimer.h>
 #include <linux/sched.h>
 #include <linux/uaccess.h>
+#include <linux/fs.h>
+
 #include "spp.h"
 
 static enum hrtimer_restart timer_handler(struct hrtimer * timer);
@@ -148,6 +149,6 @@ static void __exit spp_exit(void)
 
 module_init(spp_init);
 module_exit(spp_exit);
-MODULE_AUTHOR("hrtimer test for demo only");
-MODULE_DESCRIPTION("hrtimer resolution");
+MODULE_AUTHOR("Cihangir Akturk");
+MODULE_DESCRIPTION("TI ADS1271 daisy chain driver");
 MODULE_LICENSE("GPL");
