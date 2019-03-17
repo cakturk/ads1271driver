@@ -10,30 +10,33 @@
 #include <linux/uaccess.h>
 #include "spp.h"
 
-static unsigned int count;
-
-static struct hrtimer htimer;
-static ktime_t kt_period;
-
-static enum hrtimer_restart timer_function(struct hrtimer * timer);
+static enum hrtimer_restart timer_handler(struct hrtimer * timer);
 
 struct spp_periodic {
 	struct hrtimer timer;
 	ktime_t period;
+	unsigned int nr_ticks;
 };
 
-static void timer_init(void)
-{
-	kt_period = ktime_set(0, 22675); //seconds,nanoseconds
-	hrtimer_init (&htimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	htimer.function = timer_function;
-	hrtimer_start(&htimer, kt_period, HRTIMER_MODE_REL);
-}
+#define to_spp_periodic(ptr) container_of(ptr, struct spp_periodic, timer)
 
-static enum hrtimer_restart timer_function(struct hrtimer * timer)
+/* static unsigned int count; */
+/* static void timer_init(void) */
+/* { */
+/* 	kt_period = ktime_set(0, 22675); //seconds,nanoseconds */
+/* 	hrtimer_init (&htimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL); */
+/* 	htimer.function = timer_handler; */
+/* 	hrtimer_start(&htimer, kt_period, HRTIMER_MODE_REL); */
+/* } */
+
+
+static enum hrtimer_restart timer_handler(struct hrtimer *timer)
 {
-	count++;
-	hrtimer_forward_now(timer, kt_period);
+	struct spp_periodic *s;
+
+	s = to_spp_periodic(timer);
+	hrtimer_forward_now(timer, s->period);
+	s->nr_ticks++;
 
 	return HRTIMER_RESTART;
 }
@@ -52,31 +55,28 @@ static ssize_t spp_write(struct file *filp, const char __user *buf,
 
 static long spp_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
-	long n;
-	char buf[128];
 	const void __user *from;
 	struct spp_conf cnf;
 	struct spp_periodic *sp;
+	int ret;
 
 	sp = filp->private_data;
 	from = (const void __user *)arg;
-	if (!access_ok(VERIFY_READ, from, 8))
-		return -EFAULT;
 
-	n = __copy_from_user(buf, from, 8);
-	buf[8] = '\0';
-
-	printk(KERN_INFO "ioctl invoked with cmd: %x, arg: %s, n: %ld, %#lx, %#x, %#x\n",
-	       cmd, buf, n, SPPIOC_SPARAMS, SPPIOC_START, SPPIOC_STOP);
 	switch (cmd) {
 	case SPPIOC_START:
+		hrtimer_start(&sp->timer, sp->period, HRTIMER_MODE_REL);
 		break;
 	case SPPIOC_STOP:
+		ret = hrtimer_cancel(&sp->timer);
+		if (!ret)
+			printk(KERN_INFO "timer was not active\n");
 		break;
 	case SPPIOC_SPARAMS:
 		if (copy_from_user(&cnf, from, sizeof(cnf)))
 			return -EFAULT;
-		printk(KERN_INFO "cnf params: %lld secs, %llu nsecs\n", cnf.secs, cnf.nsecs);
+		printk(KERN_INFO "cnf params: %lld secs, %llu nsecs\n",
+		       cnf.secs, cnf.nsecs);
 		sp->period = ktime_set(cnf.secs, cnf.nsecs);
 		break;
 	default:
@@ -118,16 +118,17 @@ static struct miscdevice perdev = {
 static int __init spp_init(void)
 {
 	int err;
-	unsigned int resolution = hrtimer_resolution;
-
-	timer_init();
-	printk(KERN_INFO "resolution : %u secs\n", resolution);
 
 	err = misc_register(&perdev);
 	if (err) {
 		printk(KERN_ERR "error registering misc device\n");
 		return -EINVAL;
 	}
+
+	hrtimer_init(&spp.timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	spp.timer.function = timer_handler;
+
+	printk(KERN_INFO "resolution : %u secs\n", hrtimer_resolution);
 
 	return 0;
 }
@@ -136,12 +137,13 @@ static void __exit spp_exit(void)
 {
 	int ret;
 
-	ret = hrtimer_cancel(&htimer);
-	printk(KERN_INFO "Cancelling hrtimer: %d, count: %u\n", ret, count);
+	ret = hrtimer_cancel(&spp.timer);
+	printk(KERN_INFO "Cancelling hrtimer: %d, count: %u\n",
+	       ret, spp.nr_ticks);
 
 	misc_deregister(&perdev);
 
-	return ;
+	return;
 }
 
 module_init(spp_init);
