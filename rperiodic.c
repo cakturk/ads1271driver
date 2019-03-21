@@ -32,16 +32,6 @@ struct spp_periodic {
 
 #define to_spp_periodic(ptr) container_of(ptr, struct spp_periodic, timer)
 
-static struct adc_sample *adc_buf_get(struct spp_periodic *sp)
-{
-	struct adc_sample *r;
-	unsigned int n;
-
-	n = kfifo_get(&sp->free_fifo, &r);
-	printk(KERN_INFO "spp: adc_get: %u, %p\n", n, r);
-	return r;
-}
-
 static void spp_free_fifo_init(struct spp_periodic *sp)
 {
 	struct adc_sample *as = NULL;
@@ -66,15 +56,24 @@ static inline void spp_rx_fifo_init(struct spp_periodic *sp)
 static enum hrtimer_restart timer_handler(struct hrtimer *timer)
 {
 	struct spp_periodic *s;
-	struct adc_sample *r;
+	struct adc_sample *r = NULL;
+	unsigned int n;
+	static unsigned counter = 1;
 
 	s = to_spp_periodic(timer);
 	s->nr_ticks++;
 
-	r = adc_buf_get(s);
-
+	n = kfifo_get(&s->free_fifo, &r);
+	if (n < 1) {
+		printk(KERN_INFO "spp: fifo overrun\n");
+		goto setup_timer;
+	}
+	printk(KERN_INFO "spp: putting sample: %u\n", counter);
+	memset(r, counter, sizeof(*r));
+	n = kfifo_put(&s->rx_fifo, r);
+setup_timer:
+	counter++;
 	hrtimer_forward_now(timer, s->period);
-	printk(KERN_INFO "in irq: %lu, %p\n", in_irq(), r);
 
 	return HRTIMER_RESTART;
 }
@@ -82,6 +81,16 @@ static enum hrtimer_restart timer_handler(struct hrtimer *timer)
 static ssize_t spp_read(struct file *filp, char __user *buf,
 			size_t count, loff_t *ppos)
 {
+	static struct adc_sample *smp[ADC_MAX_SAMPLES];
+	struct spp_periodic *s = filp->private_data;
+	unsigned int len, av, n;
+
+	av = kfifo_avail(&s->rx_fifo);
+	len = kfifo_len(&s->rx_fifo);
+	n = kfifo_out(&s->rx_fifo, smp, ARRAY_SIZE(smp));
+	printk(KERN_INFO "spp: read syscall: cpd: %u, avail: %u, len: %u\n",
+	       n, av, len);
+
 	return 0;
 }
 
@@ -128,8 +137,6 @@ static struct spp_periodic spp;
 
 static int spp_open(struct inode *ino, struct file *filp)
 {
-	spp_rx_fifo_init(&spp);
-	spp_free_fifo_init(&spp);
 	filp->private_data = &spp;
 	return 0;
 }
@@ -181,6 +188,8 @@ static int __init spp_init(void)
 	if (err)
 		goto err_register;
 
+	spp_rx_fifo_init(&spp);
+	spp_free_fifo_init(&spp);
 	hrtimer_init(&spp.timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	spp.timer.function = timer_handler;
 	printk(KERN_INFO "resolution : %u secs\n", hrtimer_resolution);
