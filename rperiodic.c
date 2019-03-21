@@ -18,7 +18,7 @@ struct adc_sample {
 	u8 buf[24];
 };
 
-#define ADC_MAX_SAMPLES 64
+#define ADC_MAX_SAMPLES 8
 static struct adc_sample samples[ADC_MAX_SAMPLES];
 
 struct spp_periodic {
@@ -63,6 +63,8 @@ static enum hrtimer_restart timer_handler(struct hrtimer *timer)
 	s = to_spp_periodic(timer);
 	s->nr_ticks++;
 
+	printk(KERN_INFO "spp: free_fifo: avail: %u, len: %u\n",
+	       kfifo_avail(&s->free_fifo), kfifo_len(&s->free_fifo));
 	n = kfifo_get(&s->free_fifo, &r);
 	if (n < 1) {
 		printk(KERN_INFO "spp: fifo overrun\n");
@@ -83,15 +85,36 @@ static ssize_t spp_read(struct file *filp, char __user *buf,
 {
 	static struct adc_sample *smp[ADC_MAX_SAMPLES];
 	struct spp_periodic *s = filp->private_data;
-	unsigned int len, av, n;
+	unsigned long nr_sample;
+	unsigned int i, n;
+	ssize_t ret = 0;
 
-	av = kfifo_avail(&s->rx_fifo);
-	len = kfifo_len(&s->rx_fifo);
-	n = kfifo_out(&s->rx_fifo, smp, ARRAY_SIZE(smp));
-	printk(KERN_INFO "spp: read syscall: cpd: %u, avail: %u, len: %u\n",
-	       n, av, len);
+	if (count < sizeof(struct adc_sample))
+		return -EINVAL;
 
-	return 0;
+	nr_sample = count / sizeof(struct adc_sample);
+	nr_sample = min(nr_sample, ARRAY_SIZE(smp));
+	n = kfifo_out(&s->rx_fifo, smp, nr_sample);
+	if (!n)
+		return -EAGAIN;
+
+	printk(KERN_INFO "spp: read syscall: cpd: %u\n", n);
+
+	for (i = 0; i < n; i++) {
+		struct adc_sample *as = smp[i];
+
+		if (copy_to_user(buf, as, sizeof(*as))) {
+			ret = -EFAULT;
+			break;
+		}
+		buf += sizeof(*as);
+		ret += sizeof(*as);
+	}
+
+	if (kfifo_in(&s->free_fifo, smp, n) != n)
+		printk(KERN_WARNING "spp: not enough room at free_fifo\n");
+
+	return ret;
 }
 
 static ssize_t spp_write(struct file *filp, const char __user *buf,
@@ -143,16 +166,6 @@ static int spp_open(struct inode *ino, struct file *filp)
 
 static int spp_close(struct inode *inode, struct file *filp)
 {
-	struct spp_periodic *spp = filp->private_data;
-	struct adc_sample *smpls[120];
-	unsigned int len;
-
-	memset(smpls, 0, sizeof smpls);
-	len = kfifo_out(&spp->free_fifo, smpls, 3);
-	printk(KERN_INFO "spp: close: sz: %zu, len: %u, ptr: %p, ptr: %p\n",
-	       sizeof(smpls), len, smpls[2], smpls[3]);
-	printk(KERN_INFO "spp: rx_len: %u, free_len: %u\n",
-	       kfifo_len(&spp->free_fifo), kfifo_len(&spp->free_fifo));
 	return 0;
 }
 
