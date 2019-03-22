@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"syscall"
+	"unsafe"
 )
 
 func ioctl(f uintptr, op uint, arg uintptr) error {
@@ -42,11 +43,23 @@ func main() {
 		nsecs: 500000000,
 	}
 	_ = spp
-	// err = ioctl(f.Fd(), sppIocSConf, uintptr(unsafe.Pointer(&spp)))
-	// err = ioctl(f.Fd(), sppIocStart, 0)
-	err = ioctl(f.Fd(), sppIocStop, 0)
+	err = ioctl(f.Fd(), sppIocSConf, uintptr(unsafe.Pointer(&spp)))
+	err = ioctl(f.Fd(), sppIocStart, 0)
+	// err = ioctl(f.Fd(), sppIocStop, 0)
 	if err != nil {
 		log.Fatal(err)
 	}
+	var p = make([]byte, 48)
+	n, err := f.Read(p)
+	if err != nil {
+		eagain := false
+		perr, ok := err.(*os.PathError)
+		if ok {
+			fmt.Printf("path err: %v, %T\n", perr.Err, perr.Err)
+			eagain = perr.Err == syscall.Errno(syscall.EAGAIN)
+		}
+		fmt.Printf("read n: %d,  err: %v, egain: %v, type: %T\n", n, err, eagain, err)
+	}
+	fmt.Println(p)
 	fmt.Println("Done!")
 }
