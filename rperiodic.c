@@ -9,6 +9,8 @@
 #include <linux/uaccess.h>
 #include <linux/fs.h>
 #include <linux/kfifo.h>
+#include <linux/poll.h>
+#include <linux/wait.h>
 
 #include "spp.h"
 
@@ -28,6 +30,8 @@ struct spp_periodic {
 
 	DECLARE_KFIFO_PTR(rx_fifo, struct adc_sample *);
 	DECLARE_KFIFO_PTR(free_fifo, struct adc_sample *);
+
+	wait_queue_head_t waitq;
 };
 
 #define to_spp_periodic(ptr) container_of(ptr, struct spp_periodic, timer)
@@ -73,6 +77,7 @@ static enum hrtimer_restart timer_handler(struct hrtimer *timer)
 	printk(KERN_INFO "spp: putting sample: %u\n", counter);
 	memset(r, counter, sizeof(*r));
 	n = kfifo_put(&s->rx_fifo, r);
+	wake_up_interruptible(&s->waitq);
 setup_timer:
 	counter++;
 	hrtimer_forward_now(timer, s->period);
@@ -117,6 +122,16 @@ static ssize_t spp_read(struct file *filp, char __user *buf,
 	return ret;
 }
 
+static unsigned int spp_poll(struct file *filp, struct poll_table_struct *wait)
+{
+	struct spp_periodic *sp = filp->private_data;
+
+	poll_wait(filp, &sp->waitq, wait);
+	if (kfifo_len(&sp->rx_fifo))
+		return POLLIN | POLLRDNORM;
+	return 0;
+}
+
 static ssize_t spp_write(struct file *filp, const char __user *buf,
 			 size_t count, loff_t *ppos)
 {
@@ -155,7 +170,6 @@ static long spp_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	return 0;
 }
 
-
 static struct spp_periodic spp;
 
 static int spp_open(struct inode *ino, struct file *filp)
@@ -176,6 +190,7 @@ static const struct file_operations spp_fops = {
 	.write		= spp_write,
 	.unlocked_ioctl	= spp_ioctl,
 	.open		= spp_open,
+	.poll		= spp_poll,
 	.release	= spp_close,
 };
 
@@ -201,6 +216,7 @@ static int __init spp_init(void)
 	if (err)
 		goto err_register;
 
+	init_waitqueue_head(&spp.waitq);
 	spp_rx_fifo_init(&spp);
 	spp_free_fifo_init(&spp);
 	hrtimer_init(&spp.timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
