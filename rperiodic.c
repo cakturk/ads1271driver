@@ -99,9 +99,18 @@ static ssize_t spp_read(struct file *filp, char __user *buf,
 
 	nr_sample = count / sizeof(struct adc_sample);
 	nr_sample = min(nr_sample, ARRAY_SIZE(smp));
+retry:
 	n = kfifo_out(&s->rx_fifo, smp, nr_sample);
-	if (!n)
-		return -EAGAIN;
+	if (!n) {
+		if (filp->f_flags & O_NONBLOCK)
+			return -EAGAIN;
+
+		ret = wait_event_interruptible(s->waitq,
+					       kfifo_len(&s->rx_fifo) != 0);
+		if (ret)
+			return ret;
+		goto retry;
+	}
 
 	printk(KERN_INFO "spp: read syscall: cpd: %u\n", n);
 
