@@ -1,0 +1,7 @@
+# KERN_ARCH=arm
+# KERN_CROSS_COMPILE=<toolchain prefix>
+# KDIR = <kern dir>
+
+# target box
+# IPADDR=<target box ip addr>
+# PORT=<listening port>
