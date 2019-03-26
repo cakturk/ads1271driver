@@ -1,5 +1,6 @@
-#include <linux/version.h>
+#include <linux/init.h>
 #include <linux/module.h>
+#include <linux/version.h>
 #include <linux/miscdevice.h>
 #include <linux/hrtimer.h>
 #include <linux/time.h>
@@ -11,6 +12,7 @@
 #include <linux/kfifo.h>
 #include <linux/poll.h>
 #include <linux/wait.h>
+#include <linux/spi/spi.h>
 
 #include "spp.h"
 
@@ -27,6 +29,8 @@ struct spp_periodic {
 	struct hrtimer timer;
 	ktime_t period;
 	unsigned int nr_ticks;
+
+	struct spi_device *spi;
 
 	DECLARE_KFIFO_PTR(rx_fifo, struct adc_sample *);
 	DECLARE_KFIFO_PTR(free_fifo, struct adc_sample *);
@@ -209,7 +213,7 @@ static struct miscdevice perdev = {
 	.fops = &spp_fops,
 };
 
-static int __init spp_init(void)
+static int spp_dev_init(struct spi_device *spi)
 {
 	int err;
 
@@ -226,6 +230,7 @@ static int __init spp_init(void)
 		goto err_register;
 
 	init_waitqueue_head(&spp.waitq);
+	spp.spi = spi;
 	spp_rx_fifo_init(&spp);
 	spp_free_fifo_init(&spp);
 	hrtimer_init(&spp.timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
@@ -234,7 +239,7 @@ static int __init spp_init(void)
 	return 0;
 
 err_register:
-	printk(KERN_ERR "error registering misc device\n");
+	printk(KERN_ERR "spp: error registering misc device\n");
 	kfifo_free(&spp.free_fifo);
 err_free_fifo:
 	kfifo_free(&spp.rx_fifo);
@@ -242,7 +247,7 @@ err_rx_fifo:
 	return err;
 }
 
-static void __exit spp_exit(void)
+static void spp_dev_exit(void)
 {
 	int ret;
 
@@ -252,8 +257,88 @@ static void __exit spp_exit(void)
 
 	misc_deregister(&perdev);
 	kfifo_free(&spp.rx_fifo);
+}
 
-	return;
+/* #define __devexit_p(x) x */
+/* #define __devinit */
+/* #define __devexit */
+
+#define SPP_SPI_BUS 2
+
+static inline int spp_spi_setup(struct spi_device *spi,
+				u32 hz, u8 bpw, u16 mode)
+{
+	spi->max_speed_hz = hz;
+	spi->bits_per_word = bpw;
+	spi->mode = mode;
+
+	return spi_setup(spi);
+}
+
+static inline ssize_t
+spp_sync_tx(struct spi_device *spi, u8 *rx, size_t len)
+{
+	static u8 tx[24];
+
+	struct spi_transfer     t = {
+		.tx_buf         = tx,
+		.rx_buf         = rx,
+		.len            = len,
+	};
+	struct spi_message      m;
+
+	spi_message_init(&m);
+	spi_message_add_tail(&t, &m);
+	return spi_sync(spi, &m);
+}
+
+static int __devinit spp_spi_probe(struct spi_device *spi)
+{
+	static u8 rx[24];
+	int rv;
+
+	if (spi->master->bus_num != SPP_SPI_BUS)
+		return -ENODEV;
+
+	printk(KERN_INFO "spp: spi_probe: bus-cs: %d-%d, %u\n",
+	       spi->master->bus_num, spi->chip_select, spi->max_speed_hz);
+
+	if ((rv = spp_spi_setup(spi, 24000000, 8, SPI_MODE_1)))
+		return rv;
+
+	rv = spp_sync_tx(spi, rx, 24);
+	printk(KERN_INFO "spp: spi_tx: %d\n", rv);
+	print_hex_dump(KERN_INFO, "", DUMP_PREFIX_NONE,
+		       16, 1, rx, 24, 0);
+
+	return spp_dev_init(spi);
+}
+
+static int __devexit spp_spi_remove(struct spi_device *spi)
+{
+	printk(KERN_INFO "spp: spi_remove\n");
+	spp_dev_exit();
+
+	return 0;
+}
+
+static struct spi_driver spp_spi_driver = {
+	.driver = {
+		.name =         "spidev",
+		.owner =        THIS_MODULE,
+	},
+	.probe =        spp_spi_probe,
+	.remove =       __devexit_p(spp_spi_remove),
+};
+
+static int __init spp_init(void)
+{
+	return spi_register_driver(&spp_spi_driver);
+}
+
+static void __exit spp_exit(void)
+{
+	spi_unregister_driver(&spp_spi_driver);
 }
 
 module_init(spp_init);
