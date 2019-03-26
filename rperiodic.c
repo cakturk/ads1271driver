@@ -90,7 +90,7 @@ static ssize_t spp_read(struct file *filp, char __user *buf,
 {
 	static struct adc_sample *smp[ADC_MAX_SAMPLES];
 	struct spp_periodic *s = filp->private_data;
-	unsigned long nr_sample;
+	size_t nr_sample;
 	unsigned int i, n;
 	ssize_t ret = 0;
 
@@ -221,7 +221,6 @@ static int __init spp_init(void)
 	spp_free_fifo_init(&spp);
 	hrtimer_init(&spp.timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	spp.timer.function = timer_handler;
-	printk(KERN_INFO "resolution : %u secs\n", hrtimer_resolution);
 
 	return 0;
 
