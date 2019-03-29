@@ -16,7 +16,13 @@
 
 #include "spp.h"
 
+
+struct spp_periodic;
+
 static enum hrtimer_restart timer_handler(struct hrtimer * timer);
+
+static inline int
+spp_async_tx(struct spp_periodic *spp, u8 *rx, u8 *tx, size_t len);
 
 struct adc_sample {
 	u8 buf[24];
@@ -31,6 +37,8 @@ struct spp_periodic {
 	unsigned int nr_ticks;
 
 	struct spi_device *spi;
+	struct spi_transfer strans;
+	struct spi_message smsg;
 
 	DECLARE_KFIFO_PTR(rx_fifo, struct adc_sample *);
 	DECLARE_KFIFO_PTR(free_fifo, struct adc_sample *);
@@ -46,7 +54,8 @@ static void spp_free_fifo_init(struct spp_periodic *sp)
 	int i, rv;
 
 	for (i = 0; i < ARRAY_SIZE(samples); i++) {
-		rv = kfifo_put(&sp->free_fifo, &samples[i]);
+		const struct adc_sample *a1 = &samples[i];
+		rv = kfifo_put(&sp->free_fifo, &a1);
 		printk(KERN_INFO "spp: kfifo_put: %p, %d, %d, len: %d\n",
 		       &samples[i], rv, kfifo_avail(&sp->free_fifo), kfifo_len(&sp->free_fifo));
 	}
@@ -63,13 +72,21 @@ static inline void spp_rx_fifo_init(struct spp_periodic *sp)
 
 static enum hrtimer_restart timer_handler(struct hrtimer *timer)
 {
+	static u8 rx[24];
+	static u8 tx[24];
 	struct spp_periodic *s;
 	struct adc_sample *r = NULL;
 	unsigned int n;
 	static unsigned counter = 1;
+	static int rv;
 
 	s = to_spp_periodic(timer);
 	s->nr_ticks++;
+
+	/* rv = spp_async_tx(s, rx, tx, 24); */
+	/* if (rv) { */
+	/* 	printk(KERN_INFO "spp: spi post: %d\n", rv); */
+	/* } */
 
 	printk(KERN_INFO "spp: free_fifo: avail: %u, len: %u\n",
 	       kfifo_avail(&s->free_fifo), kfifo_len(&s->free_fifo));
@@ -78,9 +95,9 @@ static enum hrtimer_restart timer_handler(struct hrtimer *timer)
 		printk(KERN_INFO "spp: fifo overrun\n");
 		goto setup_timer;
 	}
-	printk(KERN_INFO "spp: putting sample: %u\n", counter);
+	printk(KERN_INFO "spp: putting sample: %u, r: %p\n", counter, r);
 	memset(r, counter, sizeof(*r));
-	n = kfifo_put(&s->rx_fifo, r);
+	n = kfifo_put(&s->rx_fifo, (const struct adc_sample **)&r);
 	wake_up_interruptible(&s->waitq);
 setup_timer:
 	counter++;
@@ -129,7 +146,7 @@ retry:
 		ret += sizeof(*as);
 	}
 
-	if (kfifo_in(&s->free_fifo, smp, n) != n)
+	if (kfifo_in(&s->free_fifo, (const struct adc_sample **)&smp[0], n) != n)
 		printk(KERN_WARNING "spp: not enough room at free_fifo\n");
 
 	return ret;
@@ -275,6 +292,32 @@ static inline int spp_spi_setup(struct spi_device *spi,
 	return spi_setup(spi);
 }
 
+static void spp_spi_complete(void *ctx)
+{
+	printk(KERN_INFO "spp: spi tx completed: %d\n", !!in_irq());
+}
+
+static inline int
+spp_async_tx(struct spp_periodic *spp, u8 *rx, u8 *tx, size_t len)
+{
+	struct spi_message      *m = &spp->smsg;
+	struct spi_transfer     *t = &spp->strans;
+
+	spi_message_init(m);
+	spi_message_add_tail(t, m);
+
+	m->complete = spp_spi_complete;
+	m->context = spp;
+	t->tx_buf = tx;
+	t->rx_buf = rx;
+	t->len = len;
+
+	printk(KERN_INFO "spp: asynx_tx: spi: %p, rx: %p, tx: %p, len: %zd\n",
+	       spp->spi, rx, tx, len);
+
+	return spi_async(spp->spi, m);
+}
+
 static inline ssize_t
 spp_sync_tx(struct spi_device *spi, u8 *rx, size_t len)
 {
@@ -295,6 +338,7 @@ spp_sync_tx(struct spi_device *spi, u8 *rx, size_t len)
 static int __devinit spp_spi_probe(struct spi_device *spi)
 {
 	static u8 rx[24];
+	static u8 tx[24];
 	int rv;
 
 	if (spi->master->bus_num != SPP_SPI_BUS)
@@ -306,7 +350,12 @@ static int __devinit spp_spi_probe(struct spi_device *spi)
 	if ((rv = spp_spi_setup(spi, 24000000, 8, SPI_MODE_1)))
 		return rv;
 
-	rv = spp_sync_tx(spi, rx, 24);
+	spp.spi = spi;
+	/* rv = spp_sync_tx(spp.spi, rx, 24); */
+	rv = spp_async_tx(&spp, rx, tx, 24);
+	if (rv) {
+		printk(KERN_INFO "spp: spi post: %d\n", rv);
+	}
 	printk(KERN_INFO "spp: spi_tx: %d\n", rv);
 	print_hex_dump(KERN_INFO, "", DUMP_PREFIX_NONE,
 		       16, 1, rx, 24, 0);
@@ -344,5 +393,5 @@ static void __exit spp_exit(void)
 module_init(spp_init);
 module_exit(spp_exit);
 MODULE_AUTHOR("Cihangir Akturk");
-MODULE_DESCRIPTION("TI ADS1271 daisy chain driver");
+MODULE_DESCRIPTION("TI ADS1271 ADC daisy chain driver");
 MODULE_LICENSE("GPL");
