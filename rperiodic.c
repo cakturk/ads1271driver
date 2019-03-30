@@ -22,7 +22,7 @@ struct spp_periodic;
 static enum hrtimer_restart timer_handler(struct hrtimer * timer);
 
 static inline int
-spp_async_tx(struct spp_periodic *spp, u8 *rx, u8 *tx, size_t len);
+spp_async_tx(struct spp_periodic *spp);
 
 struct adc_sample {
 	u8 buf[24];
@@ -48,6 +48,9 @@ struct spp_periodic {
 
 #define to_spp_periodic(ptr) container_of(ptr, struct spp_periodic, timer)
 
+static u8 rx[24];
+static u8 tx[24];
+
 static void spp_free_fifo_init(struct spp_periodic *sp)
 {
 	struct adc_sample *as = NULL;
@@ -72,21 +75,18 @@ static inline void spp_rx_fifo_init(struct spp_periodic *sp)
 
 static enum hrtimer_restart timer_handler(struct hrtimer *timer)
 {
-	static u8 rx[24];
-	static u8 tx[24];
 	struct spp_periodic *s;
 	struct adc_sample *r = NULL;
 	unsigned int n;
+	int rv;
 	static unsigned counter = 1;
-	static int rv;
 
 	s = to_spp_periodic(timer);
 	s->nr_ticks++;
 
-	/* rv = spp_async_tx(s, rx, tx, 24); */
-	/* if (rv) { */
-	/* 	printk(KERN_INFO "spp: spi post: %d\n", rv); */
-	/* } */
+	rv = spp_async_tx(s);
+	if (rv)
+		printk(KERN_INFO "spp: spi post: %d\n", rv);
 
 	printk(KERN_INFO "spp: free_fifo: avail: %u, len: %u\n",
 	       kfifo_avail(&s->free_fifo), kfifo_len(&s->free_fifo));
@@ -295,13 +295,21 @@ static inline int spp_spi_setup(struct spi_device *spi,
 static void spp_spi_complete(void *ctx)
 {
 	printk(KERN_INFO "spp: spi tx completed: %d\n", !!in_irq());
+	print_hex_dump(KERN_INFO, "", DUMP_PREFIX_NONE,
+		       16, 1, rx, 24, 0);
 }
 
 static inline int
-spp_async_tx(struct spp_periodic *spp, u8 *rx, u8 *tx, size_t len)
+spp_async_tx(struct spp_periodic *spp)
 {
+	struct adc_sample       *r;
 	struct spi_message      *m = &spp->smsg;
 	struct spi_transfer     *t = &spp->strans;
+	unsigned		n;
+
+	n = kfifo_get(&spp->free_fifo, &r);
+	if (!n)
+		return -1;
 
 	spi_message_init(m);
 	spi_message_add_tail(t, m);
@@ -310,10 +318,10 @@ spp_async_tx(struct spp_periodic *spp, u8 *rx, u8 *tx, size_t len)
 	m->context = spp;
 	t->tx_buf = tx;
 	t->rx_buf = rx;
-	t->len = len;
+	t->len = 24;
 
-	printk(KERN_INFO "spp: asynx_tx: spi: %p, rx: %p, tx: %p, len: %zd\n",
-	       spp->spi, rx, tx, len);
+	printk(KERN_INFO "spp: asynx_tx: spi: %p, rx: %p, tx: %p\n",
+		spp->spi, rx, tx);
 
 	return spi_async(spp->spi, m);
 }
@@ -337,8 +345,6 @@ spp_sync_tx(struct spi_device *spi, u8 *rx, size_t len)
 
 static int __devinit spp_spi_probe(struct spi_device *spi)
 {
-	static u8 rx[24];
-	static u8 tx[24];
 	int rv;
 
 	if (spi->master->bus_num != SPP_SPI_BUS)
@@ -349,16 +355,6 @@ static int __devinit spp_spi_probe(struct spi_device *spi)
 
 	if ((rv = spp_spi_setup(spi, 24000000, 8, SPI_MODE_1)))
 		return rv;
-
-	spp.spi = spi;
-	/* rv = spp_sync_tx(spp.spi, rx, 24); */
-	rv = spp_async_tx(&spp, rx, tx, 24);
-	if (rv) {
-		printk(KERN_INFO "spp: spi post: %d\n", rv);
-	}
-	printk(KERN_INFO "spp: spi_tx: %d\n", rv);
-	print_hex_dump(KERN_INFO, "", DUMP_PREFIX_NONE,
-		       16, 1, rx, 24, 0);
 
 	return spp_dev_init(spi);
 }
