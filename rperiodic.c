@@ -288,6 +288,12 @@ static void spp_spi_complete(void *ctx)
 	struct spp_periodic *sp = container_of(t, struct spp_periodic, strans);
 	const struct adc_sample *s = to_adc_sample(t->rx_buf);
 
+	/* in case of error, return buffer to free list */
+	if (unlikely(sp->smsg.status)) {
+		printk(KERN_ERR "spp: spp_spi_complete: spi tx error\n");
+		kfifo_put(&sp->free_fifo, &s);
+		return;
+	}
 	if (unlikely(!kfifo_put(&sp->rx_fifo, &s)))
 		printk(KERN_ERR "spp: spp_spi_complete: rx_fifo put error\n");
 	print_hex_dump(KERN_INFO, "", DUMP_PREFIX_NONE,
