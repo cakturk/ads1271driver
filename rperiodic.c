@@ -75,8 +75,6 @@ static inline void spp_rx_fifo_init(struct spp_periodic *sp)
 static enum hrtimer_restart timer_handler(struct hrtimer *timer)
 {
 	struct spp_periodic *s;
-	struct adc_sample *r = NULL;
-	unsigned int n;
 	int rv;
 	static unsigned counter = 1;
 
@@ -84,19 +82,13 @@ static enum hrtimer_restart timer_handler(struct hrtimer *timer)
 	s->nr_ticks++;
 
 	rv = spp_async_tx(s);
-	if (rv)
+	if (rv) {
 		printk(KERN_INFO "spp: spi post: %d\n", rv);
+		goto setup_timer;
+	}
 
 	printk(KERN_INFO "spp: free_fifo: avail: %u, len: %u\n",
 	       kfifo_avail(&s->free_fifo), kfifo_len(&s->free_fifo));
-	n = kfifo_get(&s->free_fifo, &r);
-	if (n < 1) {
-		printk(KERN_INFO "spp: fifo overrun\n");
-		goto setup_timer;
-	}
-	printk(KERN_INFO "spp: putting sample: %u, r: %p\n", counter, r);
-	memset(r, counter, sizeof(*r));
-	n = kfifo_put(&s->rx_fifo, (const struct adc_sample **)&r);
 	wake_up_interruptible(&s->waitq);
 setup_timer:
 	counter++;
@@ -297,7 +289,7 @@ static void spp_spi_complete(void *ctx)
 	struct spp_periodic *sp = container_of(t, struct spp_periodic, strans);
 	const struct adc_sample *s = to_adc_sample(t->rx_buf);
 
-	kfifo_put(&sp->free_fifo, &s);
+	kfifo_put(&sp->rx_fifo, &s);
 	printk(KERN_INFO "spp: spi tx completed: %d\n", !!in_irq());
 	print_hex_dump(KERN_INFO, "", DUMP_PREFIX_NONE,
 		       16, 1, s->buf, 24, 0);
@@ -314,8 +306,10 @@ spp_async_tx(struct spp_periodic *spp)
 	unsigned		n;
 
 	n = kfifo_get(&spp->free_fifo, &r);
-	if (!n)
+	if (!n) {
+		printk(KERN_INFO "spp: fifo overrun\n");
 		return -1;
+	}
 	if (!r)
 		return -1;
 
@@ -324,7 +318,7 @@ spp_async_tx(struct spp_periodic *spp)
 
 	m->complete = spp_spi_complete;
 	m->context = t;
-	t->tx_buf = txbuf;
+	t->tx_buf = NULL;
 	t->rx_buf = r->buf;
 	t->len = 24;
 
