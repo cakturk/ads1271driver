@@ -28,6 +28,8 @@ struct adc_sample {
 	u8 buf[24];
 };
 
+#define to_adc_sample(ptr) container_of(ptr, struct adc_sample, buf[0])
+
 #define ADC_MAX_SAMPLES 8
 static struct adc_sample samples[ADC_MAX_SAMPLES];
 
@@ -47,9 +49,6 @@ struct spp_periodic {
 };
 
 #define to_spp_periodic(ptr) container_of(ptr, struct spp_periodic, timer)
-
-static u8 rx[24];
-static u8 tx[24];
 
 static void spp_free_fifo_init(struct spp_periodic *sp)
 {
@@ -294,10 +293,17 @@ static inline int spp_spi_setup(struct spi_device *spi,
 
 static void spp_spi_complete(void *ctx)
 {
+	struct spi_transfer *t = ctx;
+	struct spp_periodic *sp = container_of(t, struct spp_periodic, strans);
+	const struct adc_sample *s = to_adc_sample(t->rx_buf);
+
+	kfifo_put(&sp->free_fifo, &s);
 	printk(KERN_INFO "spp: spi tx completed: %d\n", !!in_irq());
 	print_hex_dump(KERN_INFO, "", DUMP_PREFIX_NONE,
-		       16, 1, rx, 24, 0);
+		       16, 1, s->buf, 24, 0);
 }
+
+static u8 txbuf[24];
 
 static inline int
 spp_async_tx(struct spp_periodic *spp)
@@ -310,18 +316,20 @@ spp_async_tx(struct spp_periodic *spp)
 	n = kfifo_get(&spp->free_fifo, &r);
 	if (!n)
 		return -1;
+	if (!r)
+		return -1;
 
 	spi_message_init(m);
 	spi_message_add_tail(t, m);
 
 	m->complete = spp_spi_complete;
-	m->context = spp;
-	t->tx_buf = tx;
-	t->rx_buf = rx;
+	m->context = t;
+	t->tx_buf = txbuf;
+	t->rx_buf = r->buf;
 	t->len = 24;
 
-	printk(KERN_INFO "spp: asynx_tx: spi: %p, rx: %p, tx: %p\n",
-		spp->spi, rx, tx);
+	printk(KERN_INFO "spp: async_tx: spi: %p, rx: %p, tx: %p\n",
+		spp->spi, t->rx_buf, txbuf);
 
 	return spi_async(spp->spi, m);
 }
