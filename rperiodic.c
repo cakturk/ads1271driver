@@ -89,7 +89,6 @@ static enum hrtimer_restart timer_handler(struct hrtimer *timer)
 
 	printk(KERN_INFO "spp: free_fifo: avail: %u, len: %u\n",
 	       kfifo_avail(&s->free_fifo), kfifo_len(&s->free_fifo));
-	wake_up_interruptible(&s->waitq);
 setup_timer:
 	counter++;
 	hrtimer_forward_now(timer, s->period);
@@ -289,13 +288,12 @@ static void spp_spi_complete(void *ctx)
 	struct spp_periodic *sp = container_of(t, struct spp_periodic, strans);
 	const struct adc_sample *s = to_adc_sample(t->rx_buf);
 
-	kfifo_put(&sp->rx_fifo, &s);
-	printk(KERN_INFO "spp: spi tx completed: %d\n", !!in_irq());
+	if (unlikely(!kfifo_put(&sp->rx_fifo, &s)))
+		printk(KERN_ERR "spp: spp_spi_complete: rx_fifo put error\n");
 	print_hex_dump(KERN_INFO, "", DUMP_PREFIX_NONE,
 		       16, 1, s->buf, 24, 0);
+	wake_up_interruptible(&sp->waitq);
 }
-
-static u8 txbuf[24];
 
 static inline int
 spp_async_tx(struct spp_periodic *spp)
@@ -323,7 +321,7 @@ spp_async_tx(struct spp_periodic *spp)
 	t->len = 24;
 
 	printk(KERN_INFO "spp: async_tx: spi: %p, rx: %p, tx: %p\n",
-		spp->spi, t->rx_buf, txbuf);
+		spp->spi, t->rx_buf, t->tx_buf);
 
 	return spi_async(spp->spi, m);
 }
