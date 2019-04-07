@@ -14,8 +14,6 @@
 #include <linux/wait.h>
 #include <linux/spi/spi.h>
 #include <linux/atomic.h>
-#include <linux/spinlock.h>
-#include <linux/delay.h>
 
 #include "spp.h"
 
@@ -45,8 +43,7 @@ struct spp_periodic {
 	struct spi_transfer strans;
 	struct spi_message smsg;
 
-	spinlock_t tx_lock;
-	unsigned pending_transfers;
+	atomic_t pending_transfers;
 
 	DECLARE_KFIFO_PTR(rx_fifo, struct adc_sample *);
 	DECLARE_KFIFO_PTR(free_fifo, struct adc_sample *);
@@ -64,8 +61,8 @@ static void spp_free_fifo_init(struct spp_periodic *sp)
 	for (i = 0; i < ARRAY_SIZE(samples); i++) {
 		const struct adc_sample *a1 = &samples[i];
 		rv = kfifo_put(&sp->free_fifo, &a1);
-		printk(KERN_INFO "spp: kfifo_put: %p, %d, %d, len: %d\n",
-		       &samples[i], rv, kfifo_avail(&sp->free_fifo), kfifo_len(&sp->free_fifo));
+		/* printk(KERN_INFO "spp: kfifo_put: %p, %d, %d, len: %d\n", */
+		/*        &samples[i], rv, kfifo_avail(&sp->free_fifo), kfifo_len(&sp->free_fifo)); */
 	}
 
 	rv = kfifo_peek(&sp->free_fifo, &as);
@@ -82,39 +79,21 @@ static enum hrtimer_restart timer_handler(struct hrtimer *timer)
 {
 	struct spp_periodic *s;
 	int rv;
-	unsigned long flags;
-	unsigned pending;
-	static unsigned counter = 1;
 
 	s = to_spp_periodic(timer);
 	s->nr_ticks++;
 
 	if (s->nr_ticks > 64) {
-		printk(KERN_WARNING "spp: reached ratelimit stopping: %d\n", s->pending_transfers);
+		printk(KERN_WARNING "spp: reached ratelimit stopping: %d\n",
+		       atomic_read(&s->pending_transfers));
 		wake_up_interruptible(&s->waitq);
 		return HRTIMER_NORESTART;
 	}
 
-	spin_lock_irqsave(&s->tx_lock, flags);
-	pending = s->pending_transfers;
-	if (s->pending_transfers == 0)
-		s->pending_transfers = 1;
-	spin_unlock_irqrestore(&s->tx_lock, flags);
-	if (pending) {
-		printk(KERN_WARNING "spp: there are pending spi requests: %d\n", pending);
-		goto setup_timer;
-	}
-
 	rv = spp_async_tx(s);
-	if (rv) {
-		printk(KERN_WARNING "spp: spi request returned: %d\n", rv);
-		spin_lock_irqsave(&s->tx_lock, flags);
-		s->pending_transfers = 0;
-		spin_unlock_irqrestore(&s->tx_lock, flags);
+	if (rv)
 		goto setup_timer;
-	}
 setup_timer:
-	counter++;
 	hrtimer_forward_now(timer, s->period);
 
 	return HRTIMER_RESTART;
@@ -261,7 +240,7 @@ static int spp_dev_init(struct spi_device *spi)
 		goto err_register;
 
 	init_waitqueue_head(&spp.waitq);
-	spp.pending_transfers = 0;
+	atomic_set(&spp.pending_transfers, 0);
 	spp.spi = spi;
 	spp_rx_fifo_init(&spp);
 	spp_free_fifo_init(&spp);
@@ -311,39 +290,47 @@ static void spp_spi_complete(void *ctx)
 {
 	struct spi_transfer *t = ctx;
 	struct spp_periodic *sp = container_of(t, struct spp_periodic, strans);
-	const struct adc_sample *s = to_adc_sample(t->rx_buf);
+	const struct adc_sample *sample = to_adc_sample(t->rx_buf);
 	int status = sp->smsg.status;
-	unsigned long flags;
+
+	smp_mb__before_atomic_dec();
+	atomic_dec(&sp->pending_transfers);
 
 	/* in case of error, return buffer to free list */
 	if (unlikely(status)) {
 		printk(KERN_ERR "spp: spp_spi_complete: spi tx error\n");
-		kfifo_put(&sp->free_fifo, &s);
-		goto out_pending;
+		kfifo_put(&sp->free_fifo, &sample);
+		goto wake_up;
 	}
-	if (unlikely(!kfifo_put(&sp->rx_fifo, &s)))
+	if (unlikely(!kfifo_put(&sp->rx_fifo, &sample)))
 		printk(KERN_ERR "spp: spp_spi_complete: rx_fifo put error\n");
 	/* print_hex_dump(KERN_INFO, "", DUMP_PREFIX_NONE, */
 	/* 	       16, 1, s->buf, 24, 0); */
-out_pending:
-	spin_lock_irqsave(&sp->tx_lock, flags);
-	sp->pending_transfers = 0;
-	spin_unlock_irqrestore(&sp->tx_lock, flags);
+wake_up:
 	wake_up_interruptible(&sp->waitq);
 }
 
 static inline int
 spp_async_tx(struct spp_periodic *spp)
 {
-	struct adc_sample       *r;
+	struct adc_sample       *r = NULL;
 	struct spi_message      *m = &spp->smsg;
 	struct spi_transfer     *t = &spp->strans;
 	unsigned		n;
+	int			ret;
+
+	ret = __atomic_add_unless(&spp->pending_transfers, 1, 1);
+	if (ret > 0) {
+		printk(KERN_WARNING "spp: there are pending spi requests: %d\n",
+		       ret);
+		return -1;
+	}
 
 	n = kfifo_get(&spp->free_fifo, &r);
 	if (!n) {
 		printk(KERN_INFO "spp: fifo overrun\n");
-		return -1;
+		ret = -1;
+		goto out_err;
 	}
 	if (!r) {
 		printk(KERN_INFO "spp: fifo is null\n");
@@ -358,9 +345,18 @@ spp_async_tx(struct spp_periodic *spp)
 	t->tx_buf = NULL;
 	t->rx_buf = r->buf;
 	t->len = 24;
-	t->cs_change = 1;
 
-	return spi_async(spp->spi, m);
+	ret = spi_async(spp->spi, m);
+	if (ret) {
+		printk(KERN_WARNING "spp: spi request returned: %d\n", ret);
+		goto out_put;
+	}
+	return ret;
+out_put:
+	kfifo_put(&spp->free_fifo, (const struct adc_sample **)&r);
+out_err:
+	atomic_dec(&spp->pending_transfers);
+	return ret;
 }
 
 static inline ssize_t
@@ -415,7 +411,6 @@ static struct spi_driver spp_spi_driver = {
 
 static int __init spp_init(void)
 {
-	spin_lock_init(&spp.tx_lock);
 	return spi_register_driver(&spp_spi_driver);
 }
 
