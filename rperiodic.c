@@ -26,6 +26,7 @@ static inline int
 spp_async_tx(struct spp_periodic *spp);
 
 struct adc_sample {
+	unsigned long sample_nr;
 	u8 buf[24];
 };
 
@@ -44,6 +45,7 @@ struct spp_periodic {
 	struct spi_message smsg;
 
 	atomic_t pending_transfers;
+	atomic_t sample_seq;
 
 	DECLARE_KFIFO_PTR(rx_fifo, struct adc_sample *);
 	DECLARE_KFIFO_PTR(free_fifo, struct adc_sample *);
@@ -56,6 +58,7 @@ struct spp_periodic {
 static void spp_free_fifo_init(struct spp_periodic *sp)
 {
 	struct adc_sample *as = NULL;
+	struct adc_sample *ass = NULL;
 	int i, rv;
 
 	for (i = 0; i < ARRAY_SIZE(samples); i++) {
@@ -68,6 +71,8 @@ static void spp_free_fifo_init(struct spp_periodic *sp)
 	rv = kfifo_peek(&sp->free_fifo, &as);
 	printk(KERN_INFO "spp: peek: %p, rv: %d, size: %zu, len: %zu\n",
 	       as, rv, sizeof(sp->free_fifo), sizeof(samples[1]));
+	printk(KERN_INFO "spp: adc_sample: size: %zu, 1: %p, 2: %p\n",
+	       sizeof(*ass), &ass->sample_nr, &ass->buf);
 }
 
 static inline void spp_rx_fifo_init(struct spp_periodic *sp)
@@ -241,6 +246,7 @@ static int spp_dev_init(struct spi_device *spi)
 
 	init_waitqueue_head(&spp.waitq);
 	atomic_set(&spp.pending_transfers, 0);
+	atomic_set(&spp.sample_seq, 0);
 	spp.spi = spi;
 	spp_rx_fifo_init(&spp);
 	spp_free_fifo_init(&spp);
@@ -317,16 +323,11 @@ spp_async_tx(struct spp_periodic *spp)
 	struct spi_message      *m = &spp->smsg;
 	struct spi_transfer     *t = &spp->strans;
 	unsigned		n;
-	int			ret;
+	int			ret, sample_seq;
 
-	ret = __atomic_add_unless(&spp->pending_transfers, 1, 1);
-	if (ret > 0) {
-		printk(KERN_WARNING "spp: there are pending spi requests: %d\n",
-		       ret);
-		return -1;
-	}
+	sample_seq = atomic_inc_return(&spp->sample_seq);
 
-	n = kfifo_get(&spp->free_fifo, &r);
+	n = kfifo_peek(&spp->free_fifo, &r);
 	if (!n) {
 		printk(KERN_INFO "spp: fifo overrun\n");
 		ret = -1;
@@ -334,6 +335,13 @@ spp_async_tx(struct spp_periodic *spp)
 	}
 	if (!r) {
 		printk(KERN_INFO "spp: fifo is null\n");
+		return -1;
+	}
+
+	ret = __atomic_add_unless(&spp->pending_transfers, 1, 1);
+	if (ret > 0) {
+		printk(KERN_WARNING "spp: there are pending spi requests: %d\n",
+		       ret);
 		return -1;
 	}
 
@@ -349,11 +357,12 @@ spp_async_tx(struct spp_periodic *spp)
 	ret = spi_async(spp->spi, m);
 	if (ret) {
 		printk(KERN_WARNING "spp: spi request returned: %d\n", ret);
-		goto out_put;
+		goto out_err;
 	}
+	r->sample_nr = sample_seq;
+	kfifo_skip(&spp->free_fifo);
 	return ret;
-out_put:
-	kfifo_put(&spp->free_fifo, (const struct adc_sample **)&r);
+
 out_err:
 	atomic_dec(&spp->pending_transfers);
 	return ret;
