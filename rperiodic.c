@@ -17,7 +17,6 @@
 
 #include "spp.h"
 
-
 struct spp_periodic;
 
 static enum hrtimer_restart timer_handler(struct hrtimer * timer);
@@ -26,7 +25,7 @@ static inline int
 spp_async_tx(struct spp_periodic *spp);
 
 struct adc_sample {
-	unsigned long sample_nr;
+	u32 sample_nr;
 	u8 buf[24];
 };
 
@@ -45,12 +44,13 @@ struct spp_periodic {
 	struct spi_message smsg;
 
 	atomic_t pending_transfers;
-	atomic_t sample_seq;
+	u32 sample_seq;
 
 	DECLARE_KFIFO_PTR(rx_fifo, struct adc_sample *);
 	DECLARE_KFIFO_PTR(free_fifo, struct adc_sample *);
 
 	wait_queue_head_t waitq;
+	wait_queue_head_t wait_for_finish;
 };
 
 #define to_spp_periodic(ptr) container_of(ptr, struct spp_periodic, timer)
@@ -58,7 +58,6 @@ struct spp_periodic {
 static void spp_free_fifo_init(struct spp_periodic *sp)
 {
 	struct adc_sample *as = NULL;
-	struct adc_sample *ass = NULL;
 	int i, rv;
 
 	for (i = 0; i < ARRAY_SIZE(samples); i++) {
@@ -71,8 +70,6 @@ static void spp_free_fifo_init(struct spp_periodic *sp)
 	rv = kfifo_peek(&sp->free_fifo, &as);
 	printk(KERN_INFO "spp: peek: %p, rv: %d, size: %zu, len: %zu\n",
 	       as, rv, sizeof(sp->free_fifo), sizeof(samples[1]));
-	printk(KERN_INFO "spp: adc_sample: size: %zu, 1: %p, 2: %p\n",
-	       sizeof(*ass), &ass->sample_nr, &ass->buf);
 }
 
 static inline void spp_rx_fifo_init(struct spp_periodic *sp)
@@ -88,7 +85,7 @@ static enum hrtimer_restart timer_handler(struct hrtimer *timer)
 	s = to_spp_periodic(timer);
 	s->nr_ticks++;
 
-	if (s->nr_ticks > 64) {
+	if (s->nr_ticks > 64 && 0) {
 		printk(KERN_WARNING "spp: reached ratelimit stopping: %d\n",
 		       atomic_read(&s->pending_transfers));
 		wake_up_interruptible(&s->waitq);
@@ -178,9 +175,13 @@ static long spp_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
 	switch (cmd) {
 	case SPPIOC_START:
+		if ((ret = atomic_cmpxchg(&sp->pending_transfers, 0, 1)) != 0)
+			return -EINVAL;
 		hrtimer_start(&sp->timer, sp->period, HRTIMER_MODE_REL);
 		break;
 	case SPPIOC_STOP:
+		if (!atomic_add_unless(&sp->pending_transfers, -1, 0))
+			return -EINVAL;
 		ret = hrtimer_cancel(&sp->timer);
 		if (!ret)
 			printk(KERN_INFO "timer was not active\n");
@@ -188,8 +189,8 @@ static long spp_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	case SPPIOC_SPARAMS:
 		if (copy_from_user(&cnf, from, sizeof(cnf)))
 			return -EFAULT;
-		printk(KERN_INFO "cnf params: %lld secs, %llu nsecs\n",
-		       cnf.secs, cnf.nsecs);
+		pr_info("spp: cnf params: %lld secs, %llu nsecs\n",
+			cnf.secs, cnf.nsecs);
 		sp->period = ktime_set(cnf.secs, cnf.nsecs);
 		break;
 	default:
@@ -245,8 +246,9 @@ static int spp_dev_init(struct spi_device *spi)
 		goto err_register;
 
 	init_waitqueue_head(&spp.waitq);
+	init_waitqueue_head(&spp.wait_for_finish);
 	atomic_set(&spp.pending_transfers, 0);
-	atomic_set(&spp.sample_seq, 0);
+	spp.sample_seq = 0;
 	spp.spi = spi;
 	spp_rx_fifo_init(&spp);
 	spp_free_fifo_init(&spp);
@@ -266,14 +268,24 @@ err_rx_fifo:
 
 static void spp_dev_exit(void)
 {
+	long timout;
 	int ret;
 
 	ret = hrtimer_cancel(&spp.timer);
-	printk(KERN_INFO "Cancelling hrtimer: %d, count: %u\n",
-	       ret, spp.nr_ticks);
+	pr_info("spp: cancelling hrtimer: %d, count: %u\n",
+		ret, spp.nr_ticks);
 
+	if (atomic_add_unless(&spp.pending_transfers, -1, 0)) {
+		timout = wait_event_timeout(spp.wait_for_finish,
+					    !atomic_read(&spp.pending_transfers),
+					    msecs_to_jiffies(500));
+		pr_info("spp: wait_event: %ld, pending tx: %d\n", timout,
+			atomic_read(&spp.pending_transfers));
+	}
+	pr_info("spp: last info: pending tx: %d\n", atomic_read(&spp.pending_transfers));
 	misc_deregister(&perdev);
 	kfifo_free(&spp.rx_fifo);
+	kfifo_free(&spp.free_fifo);
 }
 
 /* #define __devexit_p(x) x */
@@ -298,9 +310,10 @@ static void spp_spi_complete(void *ctx)
 	struct spp_periodic *sp = container_of(t, struct spp_periodic, strans);
 	const struct adc_sample *sample = to_adc_sample(t->rx_buf);
 	int status = sp->smsg.status;
+	bool exiting;
 
-	smp_mb__before_atomic_dec();
-	atomic_dec(&sp->pending_transfers);
+	/* implies a memory barrier */
+	exiting = atomic_dec_and_test(&sp->pending_transfers);
 
 	/* in case of error, return buffer to free list */
 	if (unlikely(status)) {
@@ -314,34 +327,41 @@ static void spp_spi_complete(void *ctx)
 	/* 	       16, 1, s->buf, 24, 0); */
 wake_up:
 	wake_up_interruptible(&sp->waitq);
+	if (exiting)
+		wake_up(&sp->wait_for_finish);
 }
 
 static inline int
 spp_async_tx(struct spp_periodic *spp)
 {
-	struct adc_sample       *r = NULL;
+	struct adc_sample       *r;
 	struct spi_message      *m = &spp->smsg;
 	struct spi_transfer     *t = &spp->strans;
 	unsigned		n;
-	int			ret, sample_seq;
+	int			ret;
+	u32			sample_seq;
 
-	sample_seq = atomic_inc_return(&spp->sample_seq);
+	sample_seq = spp->sample_seq++;
 
 	n = kfifo_peek(&spp->free_fifo, &r);
 	if (!n) {
-		printk(KERN_INFO "spp: fifo overrun\n");
+		pr_debug("spp: fifo overrun\n");
 		ret = -1;
-		goto out_err;
+		return -1;
 	}
 	if (!r) {
 		printk(KERN_INFO "spp: fifo is null\n");
 		return -1;
 	}
 
-	ret = __atomic_add_unless(&spp->pending_transfers, 1, 1);
-	if (ret > 0) {
-		printk(KERN_WARNING "spp: there are pending spi requests: %d\n",
-		       ret);
+	ret = atomic_cmpxchg(&spp->pending_transfers, 1, 2);
+	if (ret > 1) {
+		pr_debug("spp: there are pending spi requests: %d, curr: %d, %u\n",
+			 ret, atomic_read(&spp->pending_transfers), sample_seq);
+		return -1;
+	}
+	if (!ret) {
+		pr_warn("spp: not running\n");
 		return -1;
 	}
 
@@ -364,7 +384,8 @@ spp_async_tx(struct spp_periodic *spp)
 	return ret;
 
 out_err:
-	atomic_dec(&spp->pending_transfers);
+	if (atomic_dec_and_test(&spp->pending_transfers))
+		wake_up(&spp->wait_for_finish);
 	return ret;
 }
 
