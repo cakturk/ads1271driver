@@ -37,14 +37,19 @@ static struct adc_sample samples[ADC_MAX_SAMPLES];
 struct spp_periodic {
 	struct hrtimer timer;
 	ktime_t period;
-	unsigned int nr_ticks;
 
 	struct spi_device *spi;
 	struct spi_transfer strans;
 	struct spi_message smsg;
 
 	atomic_t pending_transfers;
-	u32 sample_seq;
+
+	struct spp_stats {
+		u32 nr_ticks;
+		u32 nr_overruns;
+		u32 nr_uncompleted;
+		u32 nr_failed_tx;
+	} stats;
 
 	DECLARE_KFIFO_PTR(rx_fifo, struct adc_sample *);
 	DECLARE_KFIFO_PTR(free_fifo, struct adc_sample *);
@@ -54,6 +59,12 @@ struct spp_periodic {
 };
 
 #define to_spp_periodic(ptr) container_of(ptr, struct spp_periodic, timer)
+
+static void stats_display(struct spp_stats *s)
+{
+	pr_info("spp: stats: ticks: %u, overruns: %u, uncompleted: %u, failed_tx: %u\n",
+		s->nr_ticks, s->nr_overruns, s->nr_uncompleted, s->nr_failed_tx);
+}
 
 static void spp_free_fifo_init(struct spp_periodic *sp)
 {
@@ -83,9 +94,8 @@ static enum hrtimer_restart timer_handler(struct hrtimer *timer)
 	int rv;
 
 	s = to_spp_periodic(timer);
-	s->nr_ticks++;
 
-	if (s->nr_ticks > 64 && 0) {
+	if (s->stats.nr_ticks > 8 && 1) {
 		printk(KERN_WARNING "spp: reached ratelimit stopping: %d\n",
 		       atomic_read(&s->pending_transfers));
 		wake_up_interruptible(&s->waitq);
@@ -248,7 +258,7 @@ static int spp_dev_init(struct spi_device *spi)
 	init_waitqueue_head(&spp.waitq);
 	init_waitqueue_head(&spp.wait_for_finish);
 	atomic_set(&spp.pending_transfers, 0);
-	spp.sample_seq = 0;
+	spp.stats.nr_ticks = 0;
 	spp.spi = spi;
 	spp_rx_fifo_init(&spp);
 	spp_free_fifo_init(&spp);
@@ -273,7 +283,7 @@ static void spp_dev_exit(void)
 
 	ret = hrtimer_cancel(&spp.timer);
 	pr_info("spp: cancelling hrtimer: %d, count: %u\n",
-		ret, spp.nr_ticks);
+		ret, spp.stats.nr_ticks);
 
 	if (atomic_add_unless(&spp.pending_transfers, -1, 0)) {
 		timout = wait_event_timeout(spp.wait_for_finish,
@@ -282,7 +292,9 @@ static void spp_dev_exit(void)
 		pr_info("spp: wait_event: %ld, pending tx: %d\n", timout,
 			atomic_read(&spp.pending_transfers));
 	}
-	pr_info("spp: last info: pending tx: %d\n", atomic_read(&spp.pending_transfers));
+	pr_info("spp: last info: pending tx: %d, rx len: %u\n",
+		atomic_read(&spp.pending_transfers), kfifo_len(&spp.rx_fifo));
+	stats_display(&spp.stats);
 	misc_deregister(&perdev);
 	kfifo_free(&spp.rx_fifo);
 	kfifo_free(&spp.free_fifo);
@@ -318,6 +330,7 @@ static void spp_spi_complete(void *ctx)
 	/* in case of error, return buffer to free list */
 	if (unlikely(status)) {
 		printk(KERN_ERR "spp: spp_spi_complete: spi tx error\n");
+		sp->stats.nr_uncompleted++;
 		kfifo_put(&sp->free_fifo, &sample);
 		goto wake_up;
 	}
@@ -341,12 +354,12 @@ spp_async_tx(struct spp_periodic *spp)
 	int			ret;
 	u32			sample_seq;
 
-	sample_seq = spp->sample_seq++;
+	sample_seq = spp->stats.nr_ticks++;
 
 	n = kfifo_peek(&spp->free_fifo, &r);
 	if (!n) {
 		pr_debug("spp: fifo overrun\n");
-		ret = -1;
+		spp->stats.nr_overruns++;
 		return -1;
 	}
 	if (!r) {
@@ -358,6 +371,7 @@ spp_async_tx(struct spp_periodic *spp)
 	if (ret > 1) {
 		pr_debug("spp: there are pending spi requests: %d, curr: %d, %u\n",
 			 ret, atomic_read(&spp->pending_transfers), sample_seq);
+		spp->stats.nr_uncompleted++;
 		return -1;
 	}
 	if (!ret) {
@@ -377,6 +391,7 @@ spp_async_tx(struct spp_periodic *spp)
 	ret = spi_async(spp->spi, m);
 	if (ret) {
 		printk(KERN_WARNING "spp: spi request returned: %d\n", ret);
+		spp->stats.nr_failed_tx++;
 		goto out_err;
 	}
 	r->sample_nr = sample_seq;
