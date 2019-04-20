@@ -128,6 +128,9 @@ static ssize_t spp_read(struct file *filp, char __user *buf,
 retry:
 	n = kfifo_out(&s->rx_fifo, smp, nr_sample);
 	if (!n) {
+		if (!atomic_read(&s->pending_transfers))
+			return 0;
+
 		if (filp->f_flags & O_NONBLOCK)
 			return -EAGAIN;
 
@@ -138,7 +141,7 @@ retry:
 		goto retry;
 	}
 
-	printk(KERN_INFO "spp: read syscall: cpd: %u\n", n);
+	pr_debug("spp: read syscall: cpd: %u\n", n);
 
 	for (i = 0; i < n; i++) {
 		struct adc_sample *as = smp[i];
