@@ -31,7 +31,7 @@ struct adc_sample {
 
 #define to_adc_sample(ptr) container_of(ptr, struct adc_sample, buf[0])
 
-#define ADC_MAX_SAMPLES 64
+#define ADC_MAX_SAMPLES 1024
 static struct adc_sample samples[ADC_MAX_SAMPLES];
 
 struct spp_periodic {
@@ -45,6 +45,7 @@ struct spp_periodic {
 	atomic_t pending_transfers;
 
 	struct spp_stats {
+		atomic_t try_me;
 		u32 nr_ticks;
 		u32 nr_overruns;
 		u32 nr_uncompleted;
@@ -62,8 +63,9 @@ struct spp_periodic {
 
 static void stats_display(struct spp_stats *s)
 {
-	pr_info("spp: stats: ticks: %u, overruns: %u, uncompleted: %u, failed_tx: %u\n",
-		s->nr_ticks, s->nr_overruns, s->nr_uncompleted, s->nr_failed_tx);
+	pr_info("spp: stats: ticks: %u, overruns: %u, uncompleted: %u, failed_tx: %u, try: %d\n",
+		s->nr_ticks, s->nr_overruns, s->nr_uncompleted, s->nr_failed_tx,
+		atomic_read(&s->try_me));
 }
 
 static void spp_free_fifo_init(struct spp_periodic *sp)
@@ -95,7 +97,7 @@ static enum hrtimer_restart timer_handler(struct hrtimer *timer)
 
 	s = to_spp_periodic(timer);
 
-	if (s->stats.nr_ticks > 8 && 1) {
+	if (s->stats.nr_ticks >= 64 && 0) {
 		printk(KERN_WARNING "spp: reached ratelimit stopping: %d\n",
 		       atomic_read(&s->pending_transfers));
 		wake_up_interruptible(&s->waitq);
@@ -111,6 +113,8 @@ setup_timer:
 	return HRTIMER_RESTART;
 }
 
+static u32 tot_samples = 0;
+
 static ssize_t spp_read(struct file *filp, char __user *buf,
 			size_t count, loff_t *ppos)
 {
@@ -118,6 +122,7 @@ static ssize_t spp_read(struct file *filp, char __user *buf,
 	struct spp_periodic *s = filp->private_data;
 	size_t nr_sample;
 	unsigned int i, n;
+	struct adc_sample *prev;
 	ssize_t ret = 0;
 
 	if (count < sizeof(struct adc_sample))
@@ -143,15 +148,21 @@ retry:
 
 	pr_debug("spp: read syscall: cpd: %u\n", n);
 
+	prev = smp[0];
 	for (i = 0; i < n; i++) {
 		struct adc_sample *as = smp[i];
+		u32 diff;
 
+		diff = (as->sample_nr - prev->sample_nr);
+		if (diff > 1)
+			tot_samples += (diff - 1);
 		if (copy_to_user(buf, as, sizeof(*as))) {
 			ret = -EFAULT;
 			break;
 		}
 		buf += sizeof(*as);
 		ret += sizeof(*as);
+		prev = as;
 	}
 
 	if (kfifo_in(&s->free_fifo, (const struct adc_sample **)&smp[0], n) != n)
@@ -261,6 +272,7 @@ static int spp_dev_init(struct spi_device *spi)
 	init_waitqueue_head(&spp.waitq);
 	init_waitqueue_head(&spp.wait_for_finish);
 	atomic_set(&spp.pending_transfers, 0);
+	atomic_set(&spp.stats.try_me, 0);
 	spp.stats.nr_ticks = 0;
 	spp.spi = spi;
 	spp_rx_fifo_init(&spp);
@@ -295,8 +307,8 @@ static void spp_dev_exit(void)
 		pr_info("spp: wait_event: %ld, pending tx: %d\n", timout,
 			atomic_read(&spp.pending_transfers));
 	}
-	pr_info("spp: last info: pending tx: %d, rx len: %u\n",
-		atomic_read(&spp.pending_transfers), kfifo_len(&spp.rx_fifo));
+	pr_info("spp: last info: pending tx: %d, rx len: %u, tot_diff: %u\n",
+		atomic_read(&spp.pending_transfers), kfifo_len(&spp.rx_fifo), tot_samples);
 	stats_display(&spp.stats);
 	misc_deregister(&perdev);
 	kfifo_free(&spp.rx_fifo);
@@ -334,6 +346,7 @@ static void spp_spi_complete(void *ctx)
 	if (unlikely(status)) {
 		printk(KERN_ERR "spp: spp_spi_complete: spi tx error\n");
 		sp->stats.nr_uncompleted++;
+		atomic_inc(&sp->stats.try_me);
 		kfifo_put(&sp->free_fifo, &sample);
 		goto wake_up;
 	}
@@ -363,6 +376,7 @@ spp_async_tx(struct spp_periodic *spp)
 	if (!n) {
 		pr_debug("spp: fifo overrun\n");
 		spp->stats.nr_overruns++;
+		atomic_inc(&spp->stats.try_me);
 		return -1;
 	}
 	if (!r) {
@@ -375,6 +389,7 @@ spp_async_tx(struct spp_periodic *spp)
 		pr_debug("spp: there are pending spi requests: %d, curr: %d, %u\n",
 			 ret, atomic_read(&spp->pending_transfers), sample_seq);
 		spp->stats.nr_uncompleted++;
+		atomic_inc(&spp->stats.try_me);
 		return -1;
 	}
 	if (!ret) {
@@ -395,9 +410,11 @@ spp_async_tx(struct spp_periodic *spp)
 	if (ret) {
 		printk(KERN_WARNING "spp: spi request returned: %d\n", ret);
 		spp->stats.nr_failed_tx++;
+		atomic_inc(&spp->stats.try_me);
 		goto out_err;
 	}
 	r->sample_nr = sample_seq;
+	r->sample_nr = atomic_read(&spp->stats.try_me);
 	kfifo_skip(&spp->free_fifo);
 	return ret;
 
