@@ -251,6 +251,7 @@ static struct miscdevice perdev = {
 	.minor = MISC_DYNAMIC_MINOR,
 	.name = "spiperiodic",
 	.fops = &spp_fops,
+	.mode = 0666,
 };
 
 static int spp_dev_init(struct spi_device *spi)
