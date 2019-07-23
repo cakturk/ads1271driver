@@ -31,7 +31,7 @@ struct adc_sample {
 
 #define to_adc_sample(ptr) container_of(ptr, struct adc_sample, buf[0])
 
-#define ADC_MAX_SAMPLES 1024
+#define ADC_MAX_SAMPLES (1024*32)
 static struct adc_sample samples[ADC_MAX_SAMPLES];
 
 struct spp_periodic {
@@ -207,11 +207,15 @@ static long spp_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
 	switch (cmd) {
 	case SPPIOC_START:
-		if ((ret = atomic_cmpxchg(&sp->pending_transfers, 0, 1)) != 0)
+		if ((ret = atomic_cmpxchg(&sp->pending_transfers, 0, 1)) != 0) {
+			pr_debug("spp: failed to perform stop ioctl\n");
 			return -EINVAL;
+		}
                 /* reset buffers */
 		spp_fifo_init(sp);
 		hrtimer_start(&sp->timer, sp->period, HRTIMER_MODE_REL);
+		/* also reset frame counter */
+		atomic_set(&sp->stats.try_me, 0);
 		break;
 	case SPPIOC_STOP:
 		if (!atomic_add_unless(&sp->pending_transfers, -1, 0))
