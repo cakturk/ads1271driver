@@ -73,6 +73,8 @@ static void spp_free_fifo_init(struct spp_periodic *sp)
 	struct adc_sample *as = NULL;
 	int i, rv;
 
+	kfifo_reset(&sp->free_fifo);
+
 	for (i = 0; i < ARRAY_SIZE(samples); i++) {
 		const struct adc_sample *a1 = &samples[i];
 		rv = kfifo_put(&sp->free_fifo, &a1);
@@ -88,6 +90,12 @@ static void spp_free_fifo_init(struct spp_periodic *sp)
 static inline void spp_rx_fifo_init(struct spp_periodic *sp)
 {
 	kfifo_reset(&sp->rx_fifo);
+}
+
+static inline void spp_fifo_init(struct spp_periodic *sp)
+{
+	spp_rx_fifo_init(sp);
+	spp_free_fifo_init(sp);
 }
 
 static enum hrtimer_restart timer_handler(struct hrtimer *timer)
@@ -201,6 +209,8 @@ static long spp_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	case SPPIOC_START:
 		if ((ret = atomic_cmpxchg(&sp->pending_transfers, 0, 1)) != 0)
 			return -EINVAL;
+                /* reset buffers */
+		spp_fifo_init(sp);
 		hrtimer_start(&sp->timer, sp->period, HRTIMER_MODE_REL);
 		break;
 	case SPPIOC_STOP:
